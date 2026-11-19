@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Saídas dos scripts (caso rodem apontando para dentro desta pasta)
+_logs/
+*.sqlite3
+*.log
+*.part
+.compress_videos.lock
+
+# Editor / sistema
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+_raw/

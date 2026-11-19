@@ -1,0 +1,20 @@
+# Os scripts Python usam só a biblioteca padrão, exceto os itens abaixo.
+#
+# Pillow: necessário para midia/imagens.py (ou: sudo apt install python3-pil).
+Pillow>=10.0
+
+# PyGObject (Gio), OPCIONAL: deixa o backup_celular_samsung.py falar MTP direto pelo gvfs,
+# com varredura ~36x mais rápida e cópia ~2x mais rápida. Sem ele, o script
+# funciona pelo ponto de montagem, só que mais devagar.
+#
+# No Ubuntu, prefira o pacote do sistema (o pip precisa compilar):
+#   sudo apt install python3-gi
+# Ou, num venv:
+#   sudo apt install libgirepository-2.0-dev libcairo2-dev pkg-config
+#   pip install -r requirements.txt
+PyGObject>=3.42
+
+# Dependências de sistema (não vêm do pip):
+#   comprimir_videos.py -> ffmpeg e ffprobe   (sudo apt install ffmpeg)
+#   servidor_https.py   -> openssl            (já vem no Ubuntu)
+#   csv_para_latex.py --pdf -> pdflatex      (sudo apt install texlive-latex-recommended)
