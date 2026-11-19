@@ -22,7 +22,6 @@ Para usar um venv em vez do apt, veja `requirements.txt`.
 | Arquivo | O que faz |
 |---|---|
 | `backup_celular_samsung.py` | Backup completo de um celular Android (Samsung A13) via MTP/gvfs. Copia por prioridade (mídias de WhatsApp/Telegram/redes sociais primeiro), pode ser retomado, retenta quando o MTP trava e grava cada arquivo de forma atômica. Ajuste `DEST_ROOT` e `SOURCE_ROOT` no topo. Use `--help` para ver as opções. |
-| `versoes-antigas/backup_celular_samsung_2026-08-18.py` | Versão anterior (ago/2026), guardada só como referência. A atual tem tudo dela e mais: barra de progresso, `--desde`, lista de pendências descartáveis e proteção contra o celular bloqueado parecer vazio. |
 
 ```bash
 python3 backup-celular/backup_celular_samsung.py --dry-run   # ver o que faria
