@@ -28,6 +28,14 @@ python3 backup-celular/backup_celular_samsung.py --dry-run   # ver o que faria
 python3 backup-celular/backup_celular_samsung.py             # copiar tudo
 ```
 
+## compras/
+
+| Arquivo | O que faz |
+|---|---|
+| `mochila_lista_desejos_amazon.js` | Problema da mochila (0-1) na Lista de Desejos da Amazon: escolhe quais itens comprar sem passar de um orçamento (ex.: bônus educacional) e destaca os escolhidos na página. Pode gastar o mais perto possível do orçamento ou levar o máximo de itens. Cola no console do navegador. Ajuste `ORCAMENTO` e `OBJETIVO` no topo. |
+
+Role a lista até o fim antes de rodar, porque os itens carregam aos poucos.
+
 ## docker/
 
 | Arquivo | O que faz |
