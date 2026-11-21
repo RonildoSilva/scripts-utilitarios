@@ -27,8 +27,8 @@ Uso:
     python3 backup_celular_samsung.py --organizar --dry-run   # mostra a arrumação do DCIM em AAAA-MM
     python3 backup_celular_samsung.py --sem-por-mes    # copia o DCIM plano, espelho fiel do celular
 
-Cada pasta do DCIM (Camera, Screenshots, WhatsApp, Facebook...) cai no destino separada
-por mês: DCIM/<pasta>/AAAA-MM/arquivo. O mês vem do nome (20240602_142159.jpg,
+Cada pasta do DCIM (Camera, Screenshots, WhatsApp, Facebook...) e do Pictures (e o que
+está solto no próprio Pictures) cai no destino separada por mês: DCIM/<pasta>/AAAA-MM/arquivo. O mês vem do nome (20240602_142159.jpg,
 Screenshot_20240602_..., FB_IMG_<instante unix>.jpg) e, sem data no nome, da data de
 modificação. O manifesto grava o caminho organizado, então retomada e
 --conferir continuam valendo. --organizar arruma o que já está no disco do jeito antigo.
@@ -229,13 +229,16 @@ MAX_NAME_BYTES = 250             # ext4 limita nome de arquivo a 255 bytes
 # Pastas do celular cujos arquivos (os que estão direto nelas, não em subpasta) vão
 # para <pasta>/AAAA-MM/ no destino. "X/*" vale para cada subpasta direta de X: pasta
 # nova que um app criar no DCIM já entra organizada. --sem-por-mes esvazia isto.
-POR_MES: tuple[str, ...] = ("DCIM/*",)
+POR_MES: tuple[str, ...] = ("DCIM/*", "Pictures", "Pictures/*")
 # Data no começo do nome ou logo após "_"/"-": 20240602_142159.jpg, lv_0_20250113120411.mp4,
 # Screenshot_20240602_..., VID-20260606-WA0089.mp4, VideoCapture_20240602-...
 # Ancorado assim para não pescar "2024..." no meio de um nome-hash hexadecimal.
 DATA_NO_NOME = re.compile(r"(?:^|[_-])(20\d\d)(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])")
+# Data com separador: "2024_05_12 10_30 Office Lens.jpg", "2024-05-12_101010.jpg".
+DATA_SEPARADA = re.compile(r"(?:^|[_-])(20\d\d)[-_.](0[1-9]|1[0-2])[-_.](0[1-9]|[12]\d|3[01])(?!\d)")
 # Instante Unix no nome (s ou ms): FB_IMG_1735572905689.jpg, WA_1793382724069.jpeg.
-EPOCH_NO_NOME = re.compile(r"(?:^|_)(1\d{9})(\d{3})?(?!\d)")
+# Não pode vir colado a letra/dígito: "file_1234567890f3a..." é hash, não data.
+EPOCH_NO_NOME = re.compile(r"(?:^|_)(1\d{9})(\d{3})?(?![0-9A-Za-z])")
 EPOCH_MIN, EPOCH_MAX = 1230768000, 2051222400     # 2009-01-01 .. 2035-01-01: fora disso não é data
 PASTA_MES = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -947,7 +950,7 @@ def safe_dest(dest_root: Path, rel: str) -> Path:
 
 def mes_de(nome: str, mtime: float) -> str:
     """AAAA-MM da foto: a data do nome é a da captura; o mtime só se o nome não tiver."""
-    m = DATA_NO_NOME.search(nome)
+    m = DATA_NO_NOME.search(nome) or DATA_SEPARADA.search(nome)
     if m:
         return f"{m.group(1)}-{m.group(2)}"
     m = EPOCH_NO_NOME.search(nome)
@@ -961,7 +964,9 @@ def pasta_por_mes(pasta: str) -> bool:
     for regra in POR_MES:
         if regra.endswith("/*"):
             pai, _, filho = pasta.rpartition("/")
-            if pai == regra[:-2] and filho and not PASTA_MES.match(filho):
+            # Pasta oculta (.thumbnails, .trash) é cache/lixeira do sistema: fica como está.
+            if (pai == regra[:-2] and filho and not filho.startswith(".")
+                    and not PASTA_MES.match(filho)):
                 return True
         elif pasta == regra:
             return True
@@ -1802,9 +1807,9 @@ def main() -> int:
     ap.add_argument("--sem-renomear", action="store_true", dest="sem_renomear",
                     help="não acrescentar a extensão real em arquivo de cache com nome opaco")
     ap.add_argument("--sem-por-mes", action="store_true", dest="sem_por_mes",
-                    help="não separar as pastas do DCIM em AAAA-MM: destino espelha o celular")
+                    help="não separar DCIM e Pictures em AAAA-MM: destino espelha o celular")
     ap.add_argument("--organizar", action="store_true",
-                    help="só arruma o destino: DCIM já copiado vai para AAAA-MM e o "
+                    help="só arruma o destino: DCIM e Pictures já copiados vão para AAAA-MM e o "
                          "manifesto é corrigido (não toca no celular; use com --dry-run antes)")
     ap.add_argument("--no-gio", action="store_true",
                     help="não usar o gvfs nativo; ler tudo pelo ponto de montagem (mais lento)")
