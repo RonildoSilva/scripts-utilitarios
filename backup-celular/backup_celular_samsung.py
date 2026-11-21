@@ -24,12 +24,13 @@ Uso:
     python3 backup_celular_samsung.py --no-android-data   # pula cache de apps (menos os das redes sociais)
     python3 backup_celular_samsung.py --verify md5     # confere hash (mais seguro, ~2x mais lento)
     python3 backup_celular_samsung.py --retry-failed   # reprocessa só o que falhou antes
-    python3 backup_celular_samsung.py --organizar --dry-run   # mostra a arrumação da Câmera em AAAA-MM
-    python3 backup_celular_samsung.py --sem-por-mes    # copia a Câmera plana, espelho fiel do celular
+    python3 backup_celular_samsung.py --organizar --dry-run   # mostra a arrumação do DCIM em AAAA-MM
+    python3 backup_celular_samsung.py --sem-por-mes    # copia o DCIM plano, espelho fiel do celular
 
-A Câmera (DCIM/Camera) cai no destino separada por mês: DCIM/Camera/AAAA-MM/arquivo.
-O mês vem do nome (20240602_142159.jpg, lv_0_20250113120411.mp4) e, sem data no nome,
-da data de modificação. O manifesto grava o caminho organizado, então retomada e
+Cada pasta do DCIM (Camera, Screenshots, WhatsApp, Facebook...) cai no destino separada
+por mês: DCIM/<pasta>/AAAA-MM/arquivo. O mês vem do nome (20240602_142159.jpg,
+Screenshot_20240602_..., FB_IMG_<instante unix>.jpg) e, sem data no nome, da data de
+modificação. O manifesto grava o caminho organizado, então retomada e
 --conferir continuam valendo. --organizar arruma o que já está no disco do jeito antigo.
 """
 
@@ -226,11 +227,16 @@ RESERVE_BYTES = 1 * 1024**3      # deixa 1 GiB livre na partição de destino
 MAX_NAME_BYTES = 250             # ext4 limita nome de arquivo a 255 bytes
 
 # Pastas do celular cujos arquivos (os que estão direto nelas, não em subpasta) vão
-# para <pasta>/AAAA-MM/ no destino. --sem-por-mes esvazia isto.
-POR_MES: tuple[str, ...] = ("DCIM/Camera",)
-# Data no começo do nome ou logo após um "_": 20240602_142159.jpg, lv_0_20250113120411.mp4.
+# para <pasta>/AAAA-MM/ no destino. "X/*" vale para cada subpasta direta de X: pasta
+# nova que um app criar no DCIM já entra organizada. --sem-por-mes esvazia isto.
+POR_MES: tuple[str, ...] = ("DCIM/*",)
+# Data no começo do nome ou logo após "_"/"-": 20240602_142159.jpg, lv_0_20250113120411.mp4,
+# Screenshot_20240602_..., VID-20260606-WA0089.mp4, VideoCapture_20240602-...
 # Ancorado assim para não pescar "2024..." no meio de um nome-hash hexadecimal.
-DATA_NO_NOME = re.compile(r"(?:^|_)(20\d\d)(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])")
+DATA_NO_NOME = re.compile(r"(?:^|[_-])(20\d\d)(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])")
+# Instante Unix no nome (s ou ms): FB_IMG_1735572905689.jpg, WA_1793382724069.jpeg.
+EPOCH_NO_NOME = re.compile(r"(?:^|_)(1\d{9})(\d{3})?(?!\d)")
+EPOCH_MIN, EPOCH_MAX = 1230768000, 2051222400     # 2009-01-01 .. 2035-01-01: fora disso não é data
 PASTA_MES = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 RETRYABLE = {errno.EIO, errno.EAGAIN, errno.EBUSY, errno.ETIMEDOUT,
@@ -944,7 +950,22 @@ def mes_de(nome: str, mtime: float) -> str:
     m = DATA_NO_NOME.search(nome)
     if m:
         return f"{m.group(1)}-{m.group(2)}"
+    m = EPOCH_NO_NOME.search(nome)
+    if m and EPOCH_MIN <= int(m.group(1)) < EPOCH_MAX:
+        return time.strftime("%Y-%m", time.localtime(int(m.group(1))))
     return time.strftime("%Y-%m", time.localtime(mtime))
+
+
+def pasta_por_mes(pasta: str) -> bool:
+    """A pasta (caminho dentro do armazenamento) é separada por mês?"""
+    for regra in POR_MES:
+        if regra.endswith("/*"):
+            pai, _, filho = pasta.rpartition("/")
+            if pai == regra[:-2] and filho and not PASTA_MES.match(filho):
+                return True
+        elif pasta == regra:
+            return True
+    return False
 
 
 def organizar_rel(rel: str, mtime: float) -> str:
@@ -952,7 +973,7 @@ def organizar_rel(rel: str, mtime: float) -> str:
     Fora das pastas de POR_MES (ou em subpasta delas) devolve o próprio rel."""
     label, _, inside = rel.partition("/")
     pasta, _, nome = inside.rpartition("/")
-    if not nome or pasta not in POR_MES:
+    if not nome or not pasta_por_mes(pasta):
         return rel
     return f"{label}/{pasta}/{mes_de(nome, mtime)}/{nome}"
 
@@ -1648,8 +1669,18 @@ def organizar_destino(manifest: Manifest, dest_root: Path, logs_dir: Path, log: 
     mov = dup = conflito = fora = ok = 0
     registro: list[tuple[str, str, str]] = []
     vazias: set[Path] = set()
+    def pastas_de(label_dir: Path):
+        for regra in POR_MES:
+            if regra.endswith("/*"):
+                pai = label_dir / regra[:-2]
+                if pai.is_dir():
+                    yield from sorted(f"{regra[:-2]}/{d.name}" for d in pai.iterdir()
+                                      if d.is_dir() and pasta_por_mes(f"{regra[:-2]}/{d.name}"))
+            else:
+                yield regra
+
     for label_dir in sorted(d for d in dest_root.iterdir() if d.is_dir() and d.name != "_logs"):
-        for pasta in POR_MES:
+        for pasta in pastas_de(label_dir):
             base = label_dir / pasta
             if not base.is_dir():
                 continue
@@ -1658,7 +1689,11 @@ def organizar_destino(manifest: Manifest, dest_root: Path, logs_dir: Path, log: 
             for f in sorted(candidatos(base)):
                 if f.name.endswith(".part"):
                     continue
-                rel = f"{label_dir.name}/{pasta}/{f.name}"
+                # .corrompido: posto de lado pelo --conferir; vai pro mês junto, com o
+                # sufixo, mas o manifesto continua falando do nome original.
+                corrompido = f.name.endswith(".corrompido")
+                nome = f.name[:-len(".corrompido")] if corrompido else f.name
+                rel = f"{label_dir.name}/{pasta}/{nome}"
                 row = manifest.status_of(rel)
                 if row is None:
                     fora += 1
@@ -1667,6 +1702,8 @@ def organizar_destino(manifest: Manifest, dest_root: Path, logs_dir: Path, log: 
                               echo=False)   # backup de outro aparelho: milhares de linhas
                     continue
                 alvo = safe_dest(dest_root, organizar_rel(rel, f.stat().st_mtime))
+                if corrompido:
+                    alvo = alvo.with_name(alvo.name + ".corrompido")
                 novo = str(alvo.relative_to(dest_root))
                 if f == alvo:
                     ok += 1
@@ -1693,7 +1730,7 @@ def organizar_destino(manifest: Manifest, dest_root: Path, logs_dir: Path, log: 
                         alvo.parent.mkdir(parents=True, exist_ok=True)
                         os.rename(f, alvo)
                         vazias.add(f.parent)
-                if not dry and row[1] != novo:
+                if not dry and not corrompido and row[1] != novo:
                     manifest.db.execute("UPDATE files SET dest = ? WHERE rel = ?", (novo, rel))
             if fora_aqui:
                 log.write(f"  {fora_aqui} arquivos fora do manifesto deixados como estão "
@@ -1765,9 +1802,9 @@ def main() -> int:
     ap.add_argument("--sem-renomear", action="store_true", dest="sem_renomear",
                     help="não acrescentar a extensão real em arquivo de cache com nome opaco")
     ap.add_argument("--sem-por-mes", action="store_true", dest="sem_por_mes",
-                    help="não separar a Câmera em AAAA-MM: destino espelha o celular")
+                    help="não separar as pastas do DCIM em AAAA-MM: destino espelha o celular")
     ap.add_argument("--organizar", action="store_true",
-                    help="só arruma o destino: Câmera já copiada vai para AAAA-MM e o "
+                    help="só arruma o destino: DCIM já copiado vai para AAAA-MM e o "
                          "manifesto é corrigido (não toca no celular; use com --dry-run antes)")
     ap.add_argument("--no-gio", action="store_true",
                     help="não usar o gvfs nativo; ler tudo pelo ponto de montagem (mais lento)")
