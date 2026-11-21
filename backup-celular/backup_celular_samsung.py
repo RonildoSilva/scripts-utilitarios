@@ -24,6 +24,13 @@ Uso:
     python3 backup_celular_samsung.py --no-android-data   # pula cache de apps (menos os das redes sociais)
     python3 backup_celular_samsung.py --verify md5     # confere hash (mais seguro, ~2x mais lento)
     python3 backup_celular_samsung.py --retry-failed   # reprocessa só o que falhou antes
+    python3 backup_celular_samsung.py --organizar --dry-run   # mostra a arrumação da Câmera em AAAA-MM
+    python3 backup_celular_samsung.py --sem-por-mes    # copia a Câmera plana, espelho fiel do celular
+
+A Câmera (DCIM/Camera) cai no destino separada por mês: DCIM/Camera/AAAA-MM/arquivo.
+O mês vem do nome (20240602_142159.jpg, lv_0_20250113120411.mp4) e, sem data no nome,
+da data de modificação. O manifesto grava o caminho organizado, então retomada e
+--conferir continuam valendo. --organizar arruma o que já está no disco do jeito antigo.
 """
 
 from __future__ import annotations
@@ -33,6 +40,7 @@ import csv
 import errno
 import hashlib
 import os
+import re
 import shutil
 import signal
 import sqlite3
@@ -216,6 +224,14 @@ DESCARTAVEL_SE_FALTAR = (
 )
 RESERVE_BYTES = 1 * 1024**3      # deixa 1 GiB livre na partição de destino
 MAX_NAME_BYTES = 250             # ext4 limita nome de arquivo a 255 bytes
+
+# Pastas do celular cujos arquivos (os que estão direto nelas, não em subpasta) vão
+# para <pasta>/AAAA-MM/ no destino. --sem-por-mes esvazia isto.
+POR_MES: tuple[str, ...] = ("DCIM/Camera",)
+# Data no começo do nome ou logo após um "_": 20240602_142159.jpg, lv_0_20250113120411.mp4.
+# Ancorado assim para não pescar "2024..." no meio de um nome-hash hexadecimal.
+DATA_NO_NOME = re.compile(r"(?:^|_)(20\d\d)(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])")
+PASTA_MES = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 RETRYABLE = {errno.EIO, errno.EAGAIN, errno.EBUSY, errno.ETIMEDOUT,
              errno.ENODEV, errno.EINTR, errno.EPROTO, errno.ECONNRESET}
@@ -923,6 +939,24 @@ def safe_dest(dest_root: Path, rel: str) -> Path:
     return dest_root.joinpath(*parts)
 
 
+def mes_de(nome: str, mtime: float) -> str:
+    """AAAA-MM da foto: a data do nome é a da captura; o mtime só se o nome não tiver."""
+    m = DATA_NO_NOME.search(nome)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}"
+    return time.strftime("%Y-%m", time.localtime(mtime))
+
+
+def organizar_rel(rel: str, mtime: float) -> str:
+    """Caminho relativo no destino: <rótulo>/DCIM/Camera/x.jpg vira .../Camera/AAAA-MM/x.jpg.
+    Fora das pastas de POR_MES (ou em subpasta delas) devolve o próprio rel."""
+    label, _, inside = rel.partition("/")
+    pasta, _, nome = inside.rpartition("/")
+    if not nome or pasta not in POR_MES:
+        return rel
+    return f"{label}/{pasta}/{mes_de(nome, mtime)}/{nome}"
+
+
 def already_there(dst: Path, item: Item) -> bool:
     try:
         return dst.stat().st_size == item.size
@@ -1017,7 +1051,10 @@ def landed(manifest: "Manifest", dest_root: Path, item: Item) -> Path | None:
     arquivo renomeado pela assinatura não está onde o espelho diria."""
     row = manifest.status_of(item.rel)
     known = [dest_root / row[1]] if row and row[1] else []
-    for cand in known + [safe_dest(dest_root, item.rel)]:
+    org = safe_dest(dest_root, organizar_rel(item.rel, item.mtime))
+    # Organizado antes do espelho plano: é onde o arquivo mora agora; o plano só
+    # vale para cópia antiga que ainda não passou pelo --organizar.
+    for cand in known + [org, safe_dest(dest_root, item.rel)]:
         if already_there(cand, item):
             return cand
     return None
@@ -1157,7 +1194,7 @@ def _copy_group_loop(items, group_bytes, dest_root, manifest, log, storage, veri
     last_report = 0.0
     for idx, item in enumerate(items, 1):
         BARRA.arquivo(idx, group_done)
-        dst = safe_dest(dest_root, item.rel)
+        dst = safe_dest(dest_root, organizar_rel(item.rel, item.mtime))
 
         hit = landed(manifest, dest_root, item)   # sessão anterior já trouxe este arquivo?
 
@@ -1190,9 +1227,11 @@ def _copy_group_loop(items, group_bytes, dest_root, manifest, log, storage, veri
 
         if hit is not None:
             row = manifest.status_of(item.rel)
-            if not dry and (row is None or row[0] != "done" or not row[1]):
-                manifest.finish(item.rel, "done", item.size,
-                                dest=str(hit.relative_to(dest_root)))
+            onde = str(hit.relative_to(dest_root))
+            # row[1] != onde: o arquivo foi movido no disco (ex.: para a pasta do mês);
+            # o manifesto passa a apontar para onde ele está de fato.
+            if not dry and (row is None or row[0] != "done" or row[1] != onde):
+                manifest.finish(item.rel, "done", item.size, dest=onde)
             tot.skipped += 1
             tot.bytes += item.size
             group_done += item.size
@@ -1580,6 +1619,111 @@ def estimate(storages: list[Path], dest_root: Path, logs_dir: Path, log: Log,
 
 # ──────────────────────────────────── main ────────────────────────────────────
 
+def organizar_destino(manifest: Manifest, dest_root: Path, logs_dir: Path, log: Log,
+                      dry: bool) -> int:
+    """Arruma no disco, sem tocar no celular, o que veio antes da divisão por mês.
+
+    Para cada pasta de POR_MES em cada armazenamento já copiado, junta os arquivos
+    soltos, os de <pasta>/AAAA-MM/ e os de <pasta>/mp4/AAAA-MM/ (arrumação manual
+    antiga) em <pasta>/AAAA-MM/, com o mês tirado do nome. Só mexe no que o manifesto
+    reconhece como vindo daquela pasta do celular; o resto fica onde está, listado.
+    Cópia repetida (mesmo md5 no destino) é apagada; nome igual com conteúdo
+    diferente fica parado, listado. O manifesto passa a apontar para o novo caminho.
+    Cada movimento vai para _logs/organizar_<data>.tsv, para dar pra desfazer."""
+    def candidatos(base: Path):
+        for f in base.iterdir():
+            if f.is_file():
+                yield f
+            elif f.is_dir() and PASTA_MES.match(f.name):
+                yield from (g for g in f.iterdir() if g.is_file())
+        mp4 = base / "mp4"
+        if mp4.is_dir():
+            for f in mp4.iterdir():
+                if f.is_file():
+                    yield f
+                elif f.is_dir() and PASTA_MES.match(f.name):
+                    yield from (g for g in f.iterdir() if g.is_file())
+
+    acao = "MOVERIA" if dry else "movido"
+    mov = dup = conflito = fora = ok = 0
+    registro: list[tuple[str, str, str]] = []
+    vazias: set[Path] = set()
+    for label_dir in sorted(d for d in dest_root.iterdir() if d.is_dir() and d.name != "_logs"):
+        for pasta in POR_MES:
+            base = label_dir / pasta
+            if not base.is_dir():
+                continue
+            log.write(f"organizando {base.relative_to(dest_root)}")
+            fora_aqui = 0
+            for f in sorted(candidatos(base)):
+                if f.name.endswith(".part"):
+                    continue
+                rel = f"{label_dir.name}/{pasta}/{f.name}"
+                row = manifest.status_of(rel)
+                if row is None:
+                    fora += 1
+                    fora_aqui += 1
+                    log.write(f"  fora do manifesto, deixado: {f.relative_to(dest_root)}",
+                              echo=False)   # backup de outro aparelho: milhares de linhas
+                    continue
+                alvo = safe_dest(dest_root, organizar_rel(rel, f.stat().st_mtime))
+                novo = str(alvo.relative_to(dest_root))
+                if f == alvo:
+                    ok += 1
+                elif alvo.exists():
+                    if alvo.stat().st_size == f.stat().st_size and md5_of(alvo) == md5_of(f):
+                        dup += 1
+                        log.write(f"  {'APAGARIA' if dry else 'apagado'} (cópia idêntica de "
+                                  f"{novo}): {f.relative_to(dest_root)}")
+                        registro.append(("apagado-duplicata", str(f.relative_to(dest_root)), novo))
+                        if not dry:
+                            f.unlink()
+                            vazias.add(f.parent)
+                    else:
+                        conflito += 1
+                        log.write(f"  CONFLITO, deixado (mesmo nome, conteúdo diferente de "
+                                  f"{novo}): {f.relative_to(dest_root)}")
+                        continue
+                else:
+                    mov += 1
+                    log.write(f"  {acao}: {f.relative_to(base)} -> {alvo.relative_to(base)}",
+                              echo=dry)
+                    registro.append(("movido", str(f.relative_to(dest_root)), novo))
+                    if not dry:
+                        alvo.parent.mkdir(parents=True, exist_ok=True)
+                        os.rename(f, alvo)
+                        vazias.add(f.parent)
+                if not dry and row[1] != novo:
+                    manifest.db.execute("UPDATE files SET dest = ? WHERE rel = ?", (novo, rel))
+            if fora_aqui:
+                log.write(f"  {fora_aqui} arquivos fora do manifesto deixados como estão "
+                          "(lista no backup.log)")
+            if not dry:
+                manifest.commit()
+                vazias.add(base / "mp4")
+
+    if not dry:
+        # Só remove pasta que ficou vazia; rmdir recusa sozinho as que não ficaram.
+        for d in sorted(vazias, key=lambda x: len(x.parts), reverse=True):
+            try:
+                d.rmdir()
+                log.write(f"  pasta vazia removida: {d.relative_to(dest_root)}")
+            except OSError:
+                pass
+        if registro:
+            tsv = logs_dir / time.strftime("organizar_%Y%m%d_%H%M%S.tsv")
+            with open(tsv, "w", encoding="utf-8", newline="") as fh:
+                w = csv.writer(fh, delimiter="\t")
+                w.writerow(["acao", "de", "para"])
+                w.writerows(registro)
+            log.write(f"registro para desfazer: {tsv}")
+    pre = "simulação — " if dry else ""
+    log.write(f"{pre}{mov} {'a mover' if dry else 'movidos'}, {dup} duplicatas "
+              f"{'a apagar' if dry else 'apagadas'}, {ok} já no lugar, "
+              f"{conflito} conflitos, {fora} fora do manifesto")
+    return 1 if conflito else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Cópia completa de celular Android via MTP, retomável e priorizada.",
@@ -1620,13 +1764,20 @@ def main() -> int:
                     help="copiar também o que não abre sozinho (.exo, .temp, .preload, 0 byte)")
     ap.add_argument("--sem-renomear", action="store_true", dest="sem_renomear",
                     help="não acrescentar a extensão real em arquivo de cache com nome opaco")
+    ap.add_argument("--sem-por-mes", action="store_true", dest="sem_por_mes",
+                    help="não separar a Câmera em AAAA-MM: destino espelha o celular")
+    ap.add_argument("--organizar", action="store_true",
+                    help="só arruma o destino: Câmera já copiada vai para AAAA-MM e o "
+                         "manifesto é corrigido (não toca no celular; use com --dry-run antes)")
     ap.add_argument("--no-gio", action="store_true",
                     help="não usar o gvfs nativo; ler tudo pelo ponto de montagem (mais lento)")
     ap.add_argument("--dry-run", action="store_true", help="mostra o que faria, sem copiar")
     args = ap.parse_args()
 
-    global USE_GIO
+    global USE_GIO, POR_MES
     USE_GIO = not args.no_gio
+    if args.sem_por_mes:
+        POR_MES = ()
     only = [norm(o) for o in args.only] if args.only else None
     excluir = [norm(e) for e in args.excluir] or None
     desde = None
@@ -1646,6 +1797,11 @@ def main() -> int:
     tot = Totals()
 
     try:
+        if args.organizar:
+            if not POR_MES:
+                ap.error("--organizar não combina com --sem-por-mes")
+            return organizar_destino(manifest, dest_root, logs_dir, log, args.dry_run)
+
         if args.conferir:
             ruins = conferir_backup(manifest, dest_root, log)
             write_prontidao(manifest, logs_dir, log)
